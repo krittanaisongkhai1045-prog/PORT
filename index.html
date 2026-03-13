@@ -687,6 +687,13 @@ BLUEPRINT.forEach(b=>{const o=document.createElement('option');o.value=b.sym;o.l
 
 // ลำดับแสดงผลตาม blueprint
 const SEC_ORDER = ['FOUNDATION','PILLAR','LEADER','RAW','OTHER'];
+
+// Map ค่าหมวดเก่า → หมวดใหม่ (เพื่อ backward-compat กับข้อมูลที่บันทึกก่อนการอัปเดต)
+const CAT_MIGRATE = {
+  BASE:'FOUNDATION', BRAIN:'PILLAR', SEMI:'PILLAR',
+  CYBER:'LEADER', ENERGY:'LEADER', MATERIAL:'RAW',
+};
+function normCat(c){ return (SEC[c] ? c : CAT_MIGRATE[c] || 'OTHER'); }
 const SEC = {
   FOUNDATION:{label:'🏛️ ฐานของพอร์ต',  color:'#7ec8e3', pct:40},
   PILLAR:    {label:'⚙️ เสาหลัก',       color:'#4b96ff', pct:20},
@@ -703,7 +710,16 @@ let editId=null;
 let _priceMode='auto', _priceHistory=[];
 let pieChart=null, growthChart=null;
 
-function loadDB(){try{const r=localStorage.getItem(KEY);if(r)DB={...DB,...JSON.parse(r)};}catch(e){}}
+function loadDB(){
+  try{const r=localStorage.getItem(KEY);if(r)DB={...DB,...JSON.parse(r)};}catch(e){}
+  // migrate หมวดหมู่เก่า → ใหม่ และบันทึกทับ
+  let migrated=false;
+  DB.investments.forEach(i=>{
+    const nc=CAT_MIGRATE[i.cat];
+    if(nc){i.cat=nc;migrated=true;}
+  });
+  if(migrated) saveDB();
+}
 function saveDB(){DB.savedAt=new Date().toISOString();try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){}}
 
 /* ══ UTILS ════════════════════════════════════════════════════════════ */
@@ -1051,7 +1067,7 @@ function rInvest(){
   // ── PORT TAB ──
   const inv=calcInv();
   const byCat={};
-  DB.investments.forEach(i=>{(byCat[i.cat]||(byCat[i.cat]=[])).push(i);});
+  DB.investments.forEach(i=>{ const c=normCat(i.cat); (byCat[c]||(byCat[c]=[])).push({...i,cat:c}); });
   pg.innerHTML=tabsHtml+`
   <div class="kg">
     <div class="kpi b"><div class="kico">💼</div><div class="kl">มูลค่าปัจจุบัน</div><div class="kv b">${fB(inv.curVal)}</div></div>
