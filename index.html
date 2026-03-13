@@ -383,18 +383,18 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
     </div>
     <div class="fr">
       <div class="fg">
-        <label class="fl">จำนวนหุ้น/หน่วย</label>
-        <input class="fi" type="number" id="mi-qty" placeholder="0" step="any" oninput="calcTotal()">
+        <label class="fl">ราคาซื้อ (USD)</label>
+        <input class="fi" type="number" id="mi-buy" placeholder="0.00" step="any" oninput="onBuyInput()">
       </div>
       <div class="fg">
-        <label class="fl">ราคาซื้อ (USD)</label>
-        <input class="fi" type="number" id="mi-buy" placeholder="0.00" step="any" oninput="calcTotal()">
+        <label class="fl">เงินที่ลงทุน (฿)</label>
+        <input class="fi" type="number" id="mi-total" placeholder="0.00" step="any" oninput="onTotalInput()">
       </div>
     </div>
     <div class="fg">
-      <label class="fl">เงินที่ลงทุน (฿)</label>
-      <input class="fi" type="number" id="mi-total" placeholder="กรอกจำนวนเงินบาทที่ลงทุน" step="any" oninput="onTotalInput()">
-      <div class="fhint" id="mi-th" style="cursor:pointer" onclick="applyCalcTotal()" title="คลิกเพื่อใช้ค่านี้"></div>
+      <label class="fl">จำนวนหุ้น/หน่วย</label>
+      <input class="fi" type="number" id="mi-qty" placeholder="คำนวณจากเงินบาท หรือกรอกเอง" step="any" oninput="onQtyInput()">
+      <div class="fhint" id="mi-th"></div>
     </div>
     <!-- PRICE MODE TOGGLE -->
     <div class="fg">
@@ -412,6 +412,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
         <button class="btn btn-b btn-sm" id="mi-fetch-btn" onclick="fetchSinglePrice()" style="flex-shrink:0;white-space:nowrap">📡 ดึงราคา</button>
       </div>
       <div class="fhint ok" id="mi-ch"></div>
+      <div class="fhint" id="mi-sym-shared" style="margin-top:4px"></div>
     </div>
     <!-- MANUAL MONTHLY MODE -->
     <div id="pm-manual-sec" style="display:none;margin-bottom:11px">
@@ -1546,6 +1547,7 @@ function om(id,mode,eid=null){
     _priceHistory=d?.priceHistory?JSON.parse(JSON.stringify(d.priceHistory)):[];
     // ถ้า new: เพิ่มเดือนปัจจุบันไว้ล่วงหน้าเผื่อเลือก manual
     if(mode==='new') _priceHistory=[];
+    _lockedField = null;
     setPriceMode(_priceMode);
     document.getElementById('mi-cur').value=d?.curPrice||'';
     renderPriceHistory();
@@ -1601,6 +1603,10 @@ function saveInv(){
              priceMode:_priceMode,priceHistory};
   if(editId) DB.investments=DB.investments.map(x=>x.id===editId?rec:x);
   else DB.investments.push(rec);
+
+  // sync ราคาปัจจุบันไปยังทุก lot ที่มี symbol เดียวกัน
+  DB.investments.forEach(x=>{ if(x.sym===sym) x.curPrice=curPrice; });
+
   saveDB();cm('m-inv');toast('บันทึกสำเร็จ');rInvest();rDash();
 }
 
@@ -1669,6 +1675,20 @@ async function onSym(v){
     if(!document.getElementById('mi-tgt').value&&bp.tgt) document.getElementById('mi-tgt').value=bp.tgt;
     sh.textContent=`✓ ${bp.name}`;sh.className='fhint ok';
   }else{sh.textContent=sym?'📝 สินทรัพย์ใหม่':'';sh.className='fhint';}
+  // แสดงสถานะราคาที่ใช้ร่วมกัน (ถ้า symbol นี้มีในพอร์ตแล้ว)
+  const sharedEl = document.getElementById('mi-sym-shared');
+  const existingLots = DB.investments.filter(x=>x.sym===sym && x.id!==editId);
+  if(existingLots.length>0 && sharedEl){
+    const sharedPrice = existingLots[0].curPrice || existingLots[0].buyPrice;
+    sharedEl.innerHTML = `🔗 มี ${existingLots.length} lot ในพอร์ต — ราคาปัจจุบันใช้ร่วมกัน (<b style="color:var(--b)">${fU(sharedPrice)}</b>)`;
+    sharedEl.className = 'fhint';
+    // ถ้า field ว่างอยู่ → pre-fill ด้วยราคาที่ใช้ร่วมกัน
+    if(!document.getElementById('mi-cur').value)
+      document.getElementById('mi-cur').value = sharedPrice;
+  } else if(sharedEl){
+    sharedEl.textContent = '';
+  }
+
   // ถ้าโหมด auto: ดึงราคาอัตโนมัติ
   if(_priceMode==='auto'){
     if(LIVE[sym]?.price){
@@ -1681,7 +1701,7 @@ async function onSym(v){
       _symFetchTimer=setTimeout(()=>fetchSinglePrice(sym),700);
     }else{ch.textContent='';ch.className='fhint';}
   }
-  calcTotal();
+  recalc('buy');
 }
 
 function setPriceMode(mode){
@@ -1766,32 +1786,77 @@ async function fetchSinglePrice(symOverride){
     if(btn){btn.disabled=false;btn.textContent='📡 ดึงราคา';}
   }
 }
-function calcTotal(){
-  const qty=parseFloat(document.getElementById('mi-qty').value)||0;
-  const buy=parseFloat(document.getElementById('mi-buy').value)||0;
-  const hint=document.getElementById('mi-th');
-  const totalEl=document.getElementById('mi-total');
-  if(qty&&buy){
-    const baht=qty*buy*DB.usdthb;
-    const userHasTyped=totalEl.value&&totalEl.dataset.userEdited==='1';
-    if(!userHasTyped){
-      // ถ้ายังไม่ได้กรอก ให้แนะนำค่าคำนวณ
-      hint.innerHTML=`💡 ประมาณ <b style="color:var(--b)">${fB(baht)}</b> (${fN(qty)}×${fU(buy)}×${fN(DB.usdthb,2)}) <span style="color:var(--g);text-decoration:underline">คลิกเพื่อใช้</span>`;
-      hint.className='fhint';
-      hint.onclick=()=>{totalEl.value=fN(baht,2).replace(/,/g,'');totalEl.dataset.userEdited='1';hint.innerHTML='✅ ใช้ค่าที่คำนวณแล้ว';hint.className='fhint ok';hint.onclick=null;};
-    }
-  } else {
-    hint.textContent='';hint.className='fhint';
-  }
+/* ══ THREE-WAY CALC: ราคาซื้อ ↔ เงินบาท ↔ จำนวนหุ้น ════════════════
+   กฎ: ถ้ามีข้อมูล 2 ตัว → คำนวณตัวที่ 3 โดยอัตโนมัติ
+   ตัวที่ "ล็อก" (user กรอกเอง) จะไม่ถูกเขียนทับ
+   ลำดับความสำคัญ: qty < total < buy (buy เปลี่ยนทุกอย่าง)
+════════════════════════════════════════════════════════════════════ */
+let _lockedField = null; // 'qty' | 'total' | null
+
+function onBuyInput(){
+  _lockedField = null; // เมื่อ buy เปลี่ยน reset lock
+  recalc('buy');
 }
 function onTotalInput(){
-  const el=document.getElementById('mi-total');
-  el.dataset.userEdited=el.value?'1':'0';
-  if(!el.value) calcTotal(); // แสดง hint ใหม่ถ้าลบออก
+  _lockedField = 'total';
+  recalc('total');
 }
-function applyCalcTotal(){
-  // ฟังก์ชัน fallback ถ้า click hint โดยตรง
+function onQtyInput(){
+  _lockedField = 'qty';
+  recalc('qty');
 }
+
+function recalc(changed){
+  const fx = DB.usdthb || 35;
+  const buy  = parseFloat(document.getElementById('mi-buy').value) || 0;
+  const total = parseFloat(document.getElementById('mi-total').value) || 0;
+  const qty  = parseFloat(document.getElementById('mi-qty').value) || 0;
+  const hint = document.getElementById('mi-th');
+
+  // ต้องมี buy เสมอ — เป็นจุดอ้างอิงราคา
+  if(!buy){ hint.textContent=''; return; }
+
+  if(_lockedField === 'total' && total > 0){
+    // เงินบาท + ราคาซื้อ → คำนวณจำนวนหุ้น
+    const calcQty = total / (buy * fx);
+    if(changed !== 'qty'){
+      document.getElementById('mi-qty').value = fN(calcQty, calcQty < 1 ? 4 : 2).replace(/,/g,'');
+    }
+    hint.innerHTML = `📐 ${fB(total)} ÷ (${fU(buy)} × ${fN(fx,2)}) = <b style="color:var(--g)">${fN(calcQty, calcQty<1?4:2)} หุ้น</b>`;
+    hint.className = 'fhint ok';
+  } else if(_lockedField === 'qty' && qty > 0){
+    // จำนวนหุ้น + ราคาซื้อ → คำนวณเงินบาท
+    const calcBaht = qty * buy * fx;
+    if(changed !== 'total'){
+      document.getElementById('mi-total').value = fN(calcBaht, 2).replace(/,/g,'');
+    }
+    hint.innerHTML = `📐 ${fN(qty)} × ${fU(buy)} × ${fN(fx,2)} = <b style="color:var(--b)">${fB(calcBaht)}</b>`;
+    hint.className = 'fhint ok';
+  } else if(buy > 0 && qty > 0 && !total){
+    // qty มีแต่ไม่มี total และยังไม่ lock → แนะนำ
+    const calcBaht = qty * buy * fx;
+    hint.innerHTML = `💡 <b style="color:var(--b)">${fB(calcBaht)}</b> — <span style="color:var(--g);text-decoration:underline;cursor:pointer" onclick="fillTotal(${calcBaht})">กรอกให้เลย</span>`;
+    hint.className = 'fhint';
+  } else if(buy > 0 && total > 0 && !qty){
+    const calcQty = total / (buy * fx);
+    hint.innerHTML = `💡 <b style="color:var(--g)">${fN(calcQty, calcQty<1?4:2)} หุ้น</b> — <span style="color:var(--g);text-decoration:underline;cursor:pointer" onclick="fillQty(${calcQty})">กรอกให้เลย</span>`;
+    hint.className = 'fhint';
+  } else {
+    hint.textContent = ''; hint.className = 'fhint';
+  }
+}
+
+function fillTotal(v){
+  document.getElementById('mi-total').value = fN(v,2).replace(/,/g,'');
+  _lockedField = 'total';
+  recalc('total');
+}
+function fillQty(v){
+  document.getElementById('mi-qty').value = fN(v, v<1?4:2).replace(/,/g,'');
+  _lockedField = 'qty';
+  recalc('qty');
+}
+function calcTotal(){ recalc('buy'); } // backward compat
 
 /* ══ DELETE ══════════════════════════════════════════════════════════ */
 function doDelete(sec,id){
